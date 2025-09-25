@@ -1,16 +1,11 @@
 import mongoose from "mongoose";
 
-export async function connectDB(uri) {
-  if (!uri) throw new Error("MONGODB_URI not provided");
-
+export async function connectDB() {
+  const uri = process.env.MONGODB_URI || "mongodb://localhost:27017/cr7api";
+  if (mongoose.connection.readyState === 1) return;
   mongoose.set("strictQuery", true);
-  // optional extra logging:
-  mongoose.connection.on("connected", () => console.log("✅ Mongoose: connected"));
-  mongoose.connection.on("open", () => console.log("🔓 Mongoose: connection open"));
-  mongoose.connection.on("error", (err) => console.error("❌ Mongoose error:", err));
-  mongoose.connection.on("disconnected", () => console.log("🔴 Mongoose: disconnected"));
-
-  console.log("ℹ️ connectDB() called with URI:", uri);
-  await mongoose.connect(uri);
-  console.log("🔎 readyState after connect:", mongoose.connection.readyState);
+  await mongoose.connect(uri, {
+    dbName: process.env.MONGODB_DB || undefined,
+  });
+  console.log("✅ MongoDB connected");
 }
