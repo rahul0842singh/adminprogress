@@ -6,6 +6,7 @@ import cors from "cors";
 import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
+import metricsRouter from "./routes/metrics.js";
 import mongoose from "mongoose";
 import { connectDB } from "./db.js";
 import walletRouter from "./routes/wallet.js";
@@ -56,6 +57,7 @@ app.get("/", (_req, res) => res.json({ ok: true, message: "CR7 API up" }));
    ========================= */
 app.use("/wallet", walletRouter);
 app.use("/progress", progressRouter);
+app.use("/metrics", metricsRouter);   
 
 /* =========================
    IP Logs (compact + indexed)
