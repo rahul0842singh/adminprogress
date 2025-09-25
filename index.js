@@ -17,11 +17,9 @@ const app = express();
 
 /* ==========================================
    CORS: allow ALL origins (credentials-safe)
-   - Reflects any incoming Origin header (not "*")
-   - Works with credentials (cookies/Authorization)
    ========================================== */
 const corsOptions = {
-  origin: (_origin, cb) => cb(null, true), // allow ALL origins
+  origin: (_origin, cb) => cb(null, true), // allow ALL
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
@@ -38,11 +36,7 @@ app.options("*", cors(corsOptions));
    ========================= */
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
-
-/* =========================
-   Trust proxy (Render/CF)
-   ========================= */
-app.set("trust proxy", true);
+app.set("trust proxy", true); // so req.ip works behind CF/Render
 
 /* =========================
    Static (optional)
@@ -62,35 +56,28 @@ app.use("/wallet", walletRouter);
 app.use("/progress", progressRouter);
 
 /* =========================
-   IP Logs (new)
+   IP Logs
    ========================= */
-// Minimal Mongoose model (in-file) so you don't need another file
 const IpLogSchema = new mongoose.Schema(
   {
     ip: { type: String, index: true },
     ua: { type: String },
-    note: { type: String }, // optional client note
+    note: { type: String },
   },
   { timestamps: true }
 );
 const IpLog = mongoose.models.IpLog || mongoose.model("IpLog", IpLogSchema);
 
-/** Helper to extract client IP behind proxies/CDNs */
 function getClientIp(req) {
-  // Cloudflare
   const cf = req.headers["cf-connecting-ip"];
   if (cf) return String(cf);
-
-  // X-Forwarded-For (may contain multiple, take first)
   const xff = req.headers["x-forwarded-for"];
   if (Array.isArray(xff)) return xff[0].split(",")[0].trim();
   if (typeof xff === "string" && xff.length > 0) return xff.split(",")[0].trim();
-
-  // Fallback
-  return req.ip; // works with app.set('trust proxy', true)
+  return req.ip;
 }
 
-/** POST /log-ip  -> stores { ip, ua, note? } */
+// create
 app.post("/log-ip", async (req, res, next) => {
   try {
     const ip = getClientIp(req);
@@ -103,10 +90,32 @@ app.post("/log-ip", async (req, res, next) => {
   }
 });
 
-/** GET /ip-logs?limit=50  -> most recent first */
+// list (canonical)
 app.get("/ip-logs", async (req, res, next) => {
   try {
-    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 50));
+    const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 50));
+    const logs = await IpLog.find().sort({ createdAt: -1 }).limit(limit).lean();
+    res.json(logs);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ------ ALIASES to match your frontend ------
+// list alias
+app.get("/log-ip", async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 50));
+    const logs = await IpLog.find().sort({ createdAt: -1 }).limit(limit).lean();
+    res.json(logs);
+  } catch (err) {
+    next(err);
+  }
+});
+// recent alias (your frontend calls /log-ip/recent)
+app.get("/log-ip/recent", async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 50));
     const logs = await IpLog.find().sort({ createdAt: -1 }).limit(limit).lean();
     res.json(logs);
   } catch (err) {
@@ -126,15 +135,13 @@ app.use((_req, res) => {
    ========================= */
 app.use((err, _req, res, _next) => {
   console.error(err);
-  const status = err.status || 500;
-  res.status(status).json({ error: err.message || "server error" });
+  res.status(err.status || 500).json({ error: err.message || "server error" });
 });
 
 /* =========================
    Start
    ========================= */
 const PORT = Number(process.env.PORT) || 8000;
-
 (async () => {
   await connectDB();
   app.listen(PORT, () => {
