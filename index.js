@@ -7,69 +7,33 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { connectDB } from "./db.js";
 import walletRouter from "./routes/wallet.js";
+import progressRouter from "./routes/progress.js"; // <-- mount progress
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 
-/* =========================
-   CORS allowlist (normalized)
-   ========================= */
-function normalizeOrigin(o) {
-  if (!o) return "";
-  return String(o).trim().replace(/\/+$/, ""); // trim + remove trailing slash(es)
-}
-
-function envOrigins() {
-  // FRONTEND_ORIGINS supports comma-separated list
-  const fromList = (process.env.FRONTEND_ORIGINS || "")
-    .split(",")
-    .map(normalizeOrigin)
-    .filter(Boolean);
-
-  const single = normalizeOrigin(process.env.FRONTEND_ORIGIN);
-
-  const defaults = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://cr7officialsol.com", // ← added as requested
-  ];
-
-  // unique list
-  const set = new Set([...fromList, single, ...defaults].filter(Boolean));
-  return Array.from(set);
-}
-
-const ALLOWED_ORIGINS = envOrigins();
-
+/* ==========================================
+   CORS: allow ALL origins (credentials-safe)
+   - Reflects any incoming Origin header (not "*")
+   - Works with credentials (cookies/Authorization)
+   ========================================== */
 const corsOptions = {
-  origin(origin, cb) {
-    // allow non-browser requests (no Origin) like curl/Postman
-    if (!origin) return cb(null, true);
-
-    const incoming = normalizeOrigin(origin);
-    const allowed = ALLOWED_ORIGINS.map(normalizeOrigin);
-    const isAllowed = allowed.includes(incoming);
-
-    if (isAllowed) return cb(null, true);
-    return cb(new Error(`CORS blocked for origin: ${origin}`));
-  },
-  credentials: true,
+  origin: (_origin, cb) => cb(null, true), // allow ALL origins
+  credentials: true,                        // allow cookies/Authorization
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
-// Ensure caches/proxies vary on Origin
-app.use((req, res, next) => {
+// Ensure caches/proxies vary responses by Origin
+app.use((_, res, next) => {
   res.header("Vary", "Origin");
   next();
 });
 
 app.use(cors(corsOptions));
-// preflight for everything
+// Preflight for everything
 app.options("*", cors(corsOptions));
 
 /* =========================
@@ -84,28 +48,28 @@ app.use(morgan("dev"));
 app.use(express.static(path.join(__dirname, "public")));
 
 /* =========================
-   Health
+   Health + root
    ========================= */
-app.get("/_health", (req, res) => {
-  res.json({ ok: true, uptime: process.uptime() });
-});
+app.get("/_health", (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+app.get("/", (_req, res) => res.json({ ok: true, message: "CR7 API up" }));
 
 /* =========================
    Routes
    ========================= */
 app.use("/wallet", walletRouter);
+app.use("/progress", progressRouter); // <-- now mounted
 
 /* =========================
    404
    ========================= */
-app.use((req, res) => {
+app.use((_req, res) => {
   res.status(404).json({ error: "not found" });
 });
 
 /* =========================
    Error handler
    ========================= */
-app.use((err, req, res, next) => {
+app.use((err, _req, res, _next) => {
   console.error(err);
   const status = err.status || 500;
   res.status(status).json({ error: err.message || "server error" });
@@ -120,6 +84,6 @@ const PORT = Number(process.env.PORT) || 8000;
   await connectDB();
   app.listen(PORT, () => {
     console.log(`API listening on http://localhost:${PORT}`);
-    console.log(`CORS allowlist:`, ALLOWED_ORIGINS);
+    console.log("CORS mode: ALLOW ALL ORIGINS (credentials enabled via reflection)");
   });
 })();
