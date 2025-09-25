@@ -3,6 +3,7 @@ import "dotenv/config";
 import express from "express";
 import morgan from "morgan";
 import cors from "cors";
+import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
 import mongoose from "mongoose";
@@ -34,9 +35,10 @@ app.options("*", cors(corsOptions));
 /* =========================
    Core middleware
    ========================= */
+app.use(compression());
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
-app.set("trust proxy", true); // so req.ip works behind CF/Render
+app.set("trust proxy", true); // real client IP behind CF/Render
 
 /* =========================
    Static (optional)
@@ -56,68 +58,102 @@ app.use("/wallet", walletRouter);
 app.use("/progress", progressRouter);
 
 /* =========================
-   IP Logs
+   IP Logs (compact + indexed)
    ========================= */
 const IpLogSchema = new mongoose.Schema(
   {
-    ip: { type: String, index: true },
-    ua: { type: String },
-    note: { type: String },
+    ip: { type: String, index: true },   // server-detected IP
+    ua: { type: String },                // user-agent
+    note: { type: String },              // optional note from client
+    page: { type: String },              // optional page path
   },
   { timestamps: true }
 );
+// fast recent queries
+IpLogSchema.index({ createdAt: -1 });
+
 const IpLog = mongoose.models.IpLog || mongoose.model("IpLog", IpLogSchema);
 
 function getClientIp(req) {
+  // Prefer CF if present
   const cf = req.headers["cf-connecting-ip"];
   if (cf) return String(cf);
+  // XFF may contain multiple; first is original client
   const xff = req.headers["x-forwarded-for"];
   if (Array.isArray(xff)) return xff[0].split(",")[0].trim();
   if (typeof xff === "string" && xff.length > 0) return xff.split(",")[0].trim();
+  // Fallback (works with trust proxy)
   return req.ip;
 }
 
-// create
+/** POST /log-ip  Body: { note?, page? } */
 app.post("/log-ip", async (req, res, next) => {
   try {
     const ip = getClientIp(req);
     const ua = req.get("user-agent") || "";
-    const { note } = req.body || {};
-    const doc = await IpLog.create({ ip, ua, note });
-    res.status(201).json(doc);
+    const { note = "", page = "" } = req.body || {};
+
+    const doc = await IpLog.create({
+      ip,
+      ua,
+      note: String(note).slice(0, 200),
+      page: String(page).slice(0, 200),
+    });
+
+    // return minimal ack to reduce payload
+    res.status(201).json({ _id: doc._id, createdAt: doc.createdAt });
   } catch (err) {
     next(err);
   }
 });
 
-// list (canonical)
-app.get("/ip-logs", async (req, res, next) => {
-  try {
-    const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 50));
-    const logs = await IpLog.find().sort({ createdAt: -1 }).limit(limit).lean();
-    res.json(logs);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ------ ALIASES to match your frontend ------
-// list alias
-app.get("/log-ip", async (req, res, next) => {
-  try {
-    const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 50));
-    const logs = await IpLog.find().sort({ createdAt: -1 }).limit(limit).lean();
-    res.json(logs);
-  } catch (err) {
-    next(err);
-  }
-});
-// recent alias (your frontend calls /log-ip/recent)
+/**
+ * GET /log-ip/recent?limit=1000&after=<ISO date>
+ * Returns newest first. Compact payload { count, rows }.
+ */
 app.get("/log-ip/recent", async (req, res, next) => {
   try {
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 50));
-    const logs = await IpLog.find().sort({ createdAt: -1 }).limit(limit).lean();
-    res.json(logs);
+    const after = req.query.after; // optional cursor (ISO date)
+
+    const filter = {};
+    if (after) {
+      const dt = new Date(String(after));
+      if (!isNaN(dt.getTime())) {
+        filter.createdAt = { $lt: dt };
+      }
+    }
+
+    // Only fields the UI typically needs to list
+    const projection = { _id: 1, createdAt: 1, ip: 1, page: 1 };
+    const rows = await IpLog.find(filter, projection)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    res.json({ count: rows.length, rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Aliases to match other callers */
+app.get("/log-ip", async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 50));
+    const projection = { _id: 1, createdAt: 1, ip: 1, page: 1 };
+    const rows = await IpLog.find({}, projection).sort({ createdAt: -1 }).limit(limit).lean();
+    res.json({ count: rows.length, rows });
+  } catch (err) {
+    next(err);
+  }
+});
+app.get("/ip-logs", async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(1000, Number(req.query.limit) || 50));
+    const projection = { _id: 1, createdAt: 1, ip: 1, page: 1 };
+    const rows = await IpLog.find({}, projection).sort({ createdAt: -1 }).limit(limit).lean();
+    res.json({ count: rows.length, rows });
   } catch (err) {
     next(err);
   }
@@ -146,6 +182,6 @@ const PORT = Number(process.env.PORT) || 8000;
   await connectDB();
   app.listen(PORT, () => {
     console.log(`API listening on http://localhost:${PORT}`);
-    console.log("CORS mode: ALLOW ALL ORIGINS (credentials enabled via reflection)");
+    console.log("CORS: allow all; compression on; /wallet, /progress, /log-ip ready");
   });
 })();
