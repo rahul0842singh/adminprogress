@@ -15,38 +15,74 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 /* =========================
-   CORS allowlist (normalized)
+   CORS allowlist (by hostname)
    ========================= */
-function normalizeOrigin(o) {
-  if (!o) return "";
-  return String(o).trim().replace(/\/+$/, ""); // trim + remove trailing slash(es)
+function normalize(str) {
+  return (str || "").trim().replace(/\/+$/, "");
 }
-function envOrigins() {
-  // FRONTEND_ORIGINS supports comma-separated list
-  const fromList = (process.env.FRONTEND_ORIGINS || "")
-    .split(",")
-    .map(normalizeOrigin)
-    .filter(Boolean);
-  const single = normalizeOrigin(process.env.FRONTEND_ORIGIN);
-
-  const defaults = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://cr7officialsol.com",
-    "https://cr7react.vercel.app", // <-- added
-  ];
-
-  return Array.from(new Set([...fromList, single, ...defaults].filter(Boolean)));
+function parseHostname(origin) {
+  try {
+    return new URL(origin).hostname.toLowerCase();
+  } catch {
+    return ""; // non-URL/undefined -> treat as no origin (curl/Postman)
+  }
 }
-const ALLOWED_ORIGINS = envOrigins();
+
+// Allow injecting full origins or hostnames via env
+const envOrigins = (process.env.FRONTEND_ORIGINS || "")
+  .split(",")
+  .map(normalize)
+  .filter(Boolean);
+
+const envSingle = normalize(process.env.FRONTEND_ORIGIN);
+
+// Build allowlists
+const defaultOrigins = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "https://cr7officialsol.com",
+  "https://cr7react.vercel.app", // explicitly allowed origin
+];
+
+const allowedOrigins = Array.from(
+  new Set([...defaultOrigins, envSingle, ...envOrigins].filter(Boolean))
+);
+
+// Derive hostnames to allow (scheme/port agnostic)
+const allowedHostnames = new Set(
+  allowedOrigins
+    .map((o) => parseHostname(o) || o.toLowerCase())
+    .concat([
+      // hostnames only (scheme-agnostic) for local/dev
+      "localhost",
+      "127.0.0.1",
+      // explicit production hosts
+      "cr7officialsol.com",
+      "cr7react.vercel.app",
+    ])
+);
 
 const corsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true); // curl/Postman or same-origin
-    const incoming = normalizeOrigin(origin);
-    if (ALLOWED_ORIGINS.map(normalizeOrigin).includes(incoming)) return cb(null, true);
+    // No origin header (curl/Postman/same-origin SSR) -> allow
+    if (!origin) return cb(null, true);
+
+    const incomingOrigin = normalize(origin);
+    const incomingHost = parseHostname(incomingOrigin);
+
+    const originAllowed =
+      allowedOrigins.includes(incomingOrigin) ||
+      (incomingHost && allowedHostnames.has(incomingHost));
+
+    if (originAllowed) return cb(null, true);
+
+    // Log what was rejected to help debugging
+    console.warn(
+      `[CORS] Rejected origin: ${incomingOrigin} (host: ${incomingHost}) | allowlist:`,
+      { allowedOrigins, allowedHostnames: Array.from(allowedHostnames) }
+    );
     return cb(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true,
@@ -54,6 +90,7 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
+// Vary: Origin for caches/proxies
 app.use((_, res, next) => {
   res.header("Vary", "Origin");
   next();
@@ -99,8 +136,10 @@ app.use((err, req, res, _next) => {
 });
 
 /* =========================
-   Route listing (logs)
+   Start
    ========================= */
+const PORT = Number(process.env.PORT) || 8000;
+
 function listRoutes() {
   const routes = [];
   app._router.stack.forEach((layer) => {
@@ -122,15 +161,12 @@ function listRoutes() {
   console.log("Registered routes:", routes);
 }
 
-/* =========================
-   Start
-   ========================= */
-const PORT = Number(process.env.PORT) || 8000;
 (async () => {
   await connectDB();
   app.listen(PORT, () => {
     console.log(`API listening on http://localhost:${PORT}`);
-    console.log(`CORS allowlist:`, ALLOWED_ORIGINS);
+    console.log(`CORS full-origin allowlist:`, allowedOrigins);
+    console.log(`CORS hostname allowlist:`, Array.from(allowedHostnames));
     listRoutes();
   });
 })();
